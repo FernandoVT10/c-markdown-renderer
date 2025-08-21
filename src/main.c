@@ -6,50 +6,101 @@
 #include "utils.h"
 
 typedef enum {
-    MD_NODE_DOCUMENT = 0,
+    MD_DOCUMENT_NODE = 0,
+    MD_HEADER_NODE,
+    MD_TEXT_NODE,
 } MDNodeType;
 
 typedef struct MDNode MDNode;
 
+typedef struct {
+    MDNode *head, *tail;
+    size_t count;
+} MDNodeList;
+
+typedef struct {
+    unsigned int level;
+} MDHeaderNode;
+
 struct MDNode {
     MDNodeType type;
-
+    MDNodeList children;
     MDNode *next;
+
+    union {
+        MDHeaderNode header;
+        char *text; // null-terminated string
+    };
 };
 
 typedef struct {
     Arena *arena;
     MDNode *docNode;
+    Stack parentStack;
 } ParserData;
 
-const char *test_md = "# Title";
+const char *test_md = "# Title\n## Title 2";
 
-void *alloc_node(ParserData *parserData) {
-    return arena_alloc(parserData->arena, sizeof(MDNode));
+MDNode *alloc_node(ParserData *parserData, MDNodeType type) {
+    MDNode *node = arena_alloc(parserData->arena, sizeof(MDNode));
+    node->type = type;
+    return node;
+}
+
+void add_children_to_node(MDNode *parent, MDNode *child) {
+    if(parent->children.count == 0) {
+        parent->children.head = child;
+    } else {
+        parent->children.tail->next = child;
+    }
+
+    parent->children.tail = child;
+
+    parent->children.count++;
 }
 
 int handle_enter_block(MD_BLOCKTYPE type, void *detail, void *userData) {
     ParserData *parserData = userData;
 
+    if(type == MD_BLOCK_DOC) {
+        parserData->docNode = alloc_node(parserData, MD_DOCUMENT_NODE);
+        stack_push(&parserData->parentStack, parserData->docNode);
+        return 0;
+    }
+
+    MDNode *parentNode = stack_get_last(&parserData->parentStack);
+
+    if(parentNode == NULL) {
+        TraceLog(LOG_ERROR, "There's no items in the parentStack (block type: %d)", type);
+        return 0;
+    }
+
+    MDNode *node = NULL;
+
     switch(type) {
         case MD_BLOCK_DOC:
-            parserData->docNode = alloc_node(parserData);
-            parserData->docNode->type = MD_NODE_DOCUMENT;
-            break;
-        case MD_BLOCK_H:
-            MD_BLOCK_H_DETAIL *hDetail = detail;
-            TraceLog(LOG_INFO, "Entering Header with level: %u", hDetail->level);
-            break;
+            TraceLog(LOG_ERROR, "This should be unreachable");
+            return 0;
+        case MD_BLOCK_H: {
+            node = alloc_node(parserData, MD_HEADER_NODE);
+            node->header.level = ((MD_BLOCK_H_DETAIL *)detail)->level;
+
+            stack_push(&parserData->parentStack, node);
+        } break;
         default:
             TraceLog(LOG_ERROR, "Block type not supported");
     }
+
+    add_children_to_node(parentNode, node);
+
     return 0;
 }
 
-int handle_leave_block(MD_BLOCKTYPE type, void *detail, void *userdata) {
-    (void) detail;
-    (void) userdata;
-    TraceLog(LOG_INFO, "Leaving block: %d", type);
+int handle_leave_block(MD_BLOCKTYPE type, void *detail, void *userData) {
+    ParserData *parserData = userData;
+    if(stack_pop(&parserData->parentStack) == NULL) {
+        TraceLog(LOG_ERROR, "There's no items in the parentStack, but it's leaving a block");
+    }
     return 0;
 }
 
@@ -67,14 +118,25 @@ int handle_leave_span(MD_SPANTYPE type, void *detail, void *userdata) {
     return 0;
 }
 
-int handle_text(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *userdata) {
+int handle_text(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *userData) {
+    ParserData *parserData = userData;
+    MDNode *parentNode = stack_get_last(&parserData->parentStack);
+
+    if(parentNode == NULL) {
+        TraceLog(LOG_ERROR, "There's no items in the parentStack");
+        return 0;
+    }
+
     switch(type) {
         case MD_TEXT_NORMAL:
-            printf("Text with size %u: ", size);
-            for(size_t i = 0; i < size; i++) {
-                putchar(text[i]);
-            }
-            printf("\n");
+            MDNode *textNode = alloc_node(parserData, MD_TEXT_NODE);
+
+            // copy the text into the ode
+            textNode->text = arena_alloc(parserData->arena, size + 1);
+            memcpy(textNode->text, text, size);
+            textNode->text[size] = '\0';
+
+            add_children_to_node(parentNode, textNode);
             break;
         default:
             TraceLog(LOG_ERROR, "Text type not supported");
@@ -82,10 +144,67 @@ int handle_text(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *userd
     return 0;
 }
 
-int main() {
-    InitWindow(1280, 720, "C Markdown Renderer");
-    SetTargetFPS(60);
+void print_indent(int indent) {
+    for(int i = 0; i < indent; i++) {
+        putchar(' ');
+    }
+}
 
+void print_md_node(MDNode *node, int indent);
+
+void print_md_node_children(MDNodeList children, int indent) {
+    MDNode *node = children.head;
+    while(node != NULL) {
+        print_md_node(node, indent);
+        node = node->next;
+    }
+}
+
+void print_md_node(MDNode *node, int indent) {
+    print_indent(indent);
+    switch(node->type) {
+        case MD_DOCUMENT_NODE:
+            printf("DOCUMENT {\n");
+            print_md_node_children(node->children, indent + 4);
+            printf("}\n");
+            break;
+        case MD_HEADER_NODE:
+            printf("HEADER(%u) {\n", node->header.level);
+            print_md_node_children(node->children, indent + 4);
+            print_indent(indent);
+            printf("}\n");
+            break;
+        case MD_TEXT_NODE:
+            printf("TEXT(%s)\n", node->text);
+            break;
+    }
+}
+
+void draw_node(MDNode *node);
+
+void draw_node_children(MDNodeList children) {
+    MDNode *child = children.head;
+    while(child != NULL) {
+        draw_node(child);
+        child = child->next;
+    }
+}
+
+void draw_node(MDNode *node) {
+    switch(node->type) {
+        case MD_DOCUMENT_NODE:
+            draw_node_children(node->children);
+            break;
+        case MD_HEADER_NODE:
+            draw_node_children(node->children);
+            break;
+        case MD_TEXT_NODE:
+            draw_text_node(node);
+            break;
+    }
+}
+
+int main() {
     Arena *mdArena = arena_create();
 
     MD_PARSER parser = {
@@ -105,9 +224,18 @@ int main() {
 
     md_parse(test_md, strlen(test_md), &parser, &data);
 
+    // print_md_node(data.docNode, 0);
+    // return 0;
+
+    InitWindow(1280, 720, "C Markdown Renderer");
+    SetTargetFPS(60);
+
     while(!WindowShouldClose()) {
         BeginDrawing();
         ClearBackground(RED);
+
+        draw_node(data.docNode);
+
         EndDrawing();
     }
 
