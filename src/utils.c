@@ -1,3 +1,4 @@
+#include <string.h>
 #include <assert.h>
 #include <stdlib.h>
 
@@ -51,6 +52,23 @@ void *arena_alloc(Arena *arena, size_t bytes) {
     }
 
     void *mem = region->data + region->count;
+    bzero(mem, bytes);
     region->count += bytes;
     return mem;
+}
+
+void stack_push(Stack *stack, void *item) {
+    assert(stack->count < MAX_STACK_SIZE && "Max stack size reached");
+    stack->items[stack->count] = item;
+    stack->count++;
+}
+
+void *stack_pop(Stack *stack) {
+    if(stack->count == 0) return NULL;
+    return stack->items[--stack->count];
+}
+
+void *stack_get_last(Stack *stack) {
+    if(stack->count == 0) return NULL;
+    return stack->items[stack->count - 1];
 }
